@@ -24,4 +24,4 @@ If bash
 Usage
 ---
 
-got to any git repository and type `p` in terminal, type your message and thats it.
+got to any git repository and type `p` in terminal, type your message and that's it.
