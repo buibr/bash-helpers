@@ -1,0 +1,27 @@
+#!/bin/bash
+
+directory=`pwd`
+
+if [ ! -d "${directory}/.git/" ]; then
+  echo "This folder is not a git repository"
+  exit 0
+fi
+
+cd ${directory}
+
+branch=$(git branch | grep \* | cut -d ' ' -f2-)
+origin=$(git remote)
+
+echo "################################"
+echo "#    Directory:      ${directory} "
+echo "#    Branch:         ${origin}/${branch} "
+read -p "#    Commit message: " Message
+echo "#--------------------------"
+git add -A
+git commit -am "${Message}"
+git fetch
+git pull --ff-only -ff || git pull --rebase
+git push origin ${branch}
+echo "#--------------------------"
+echo "#    Done."
+echo "################################"
