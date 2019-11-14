@@ -1,4 +1,9 @@
-# git-sh
+# bash-helpers
+Idea of how to make 
+  git add .
+  git commit -m 'message'
+  git push -u origin $(branch)
+
 Execute git push with less typing..
 
 Download
