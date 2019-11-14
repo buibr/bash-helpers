@@ -1,0 +1,26 @@
+#!/bin/bash
+
+mysqlversion=$(mysql -V)
+
+echo "################################"
+echo "#    Create new mysql database"
+echo "################################"
+echo "#    Mysl:      ${mysqlversion}"
+read -p "#    New Database:  " Database
+read -p "#    New User:      " User
+read -p "#    New Passwor:   " Password
+echo "#--------------------------"
+read -p "#    Mysql Root Password: " RootPasswod
+echo "#--------------------------"
+echo "#    Generating file..."
+echo "CREATE DATABASE ${Database} CHARACTER SET utf8 COLLATE utf8_general_ci;" > /tmp/tempsql.sql
+echo "GRANT ALL PRIVILEGES ON ${Database}.* TO '${Database}'@'localhost' IDENTIFIED BY  '${Password}';" >> /tmp/tempsql.sql
+echo "FLUSH PRIVILEGES;" >> /tmp/tempsql.sql
+echo "#--------------------------"
+echo "#    Storing to database"
+mysql -uroot -p${RootPasswod} < /tmp/tempsql.sql
+echo "#--------------------------"
+echo "#    Removing temporary files"
+rm -rf /tmp/tempsql.sql
+echo "#    Process finished."
+echo "################################"
