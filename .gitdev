@@ -1,8 +1,19 @@
 #!/bin/bash
 
+#
+# Copy this file to ~/.gitdev
+#   - curl https://raw.githubusercontent.com/buibr/bash-helpers/master/.gitdev --output ~/.gidev
+#   or
+#   - wget -O ~/.gidev https://raw.githubusercontent.com/buibr/bash-helpers/master/.gitdev
+#
+# Add alias to your bash or zsh with a shortcut( i usualy do 'p')
+#   - bash  echo "alias p='~/.gitdev'" >> ~/.bashrc
+#   - zsh   echo "alias p='~/.gitdev'" >> ~/.zshrc
+# 
+
 directory=`pwd`
 
-if [ ! -d "${directory}/.git/" ]; then
+if [ ! -d "${directory}/.git" ]; then
   echo "This folder is not a git repository"
   exit 0
 fi
@@ -17,11 +28,12 @@ echo "#    Directory:      ${directory} "
 echo "#    Branch:         ${origin}/${branch} "
 read -p "#    Commit message: " Message
 echo "#--------------------------"
+git push -u origin HEAD
 git add -A
 git commit -am "${Message}"
 git fetch
 git pull --ff-only -ff || git pull --rebase
-git push origin ${branch}
+git push ${origin} ${branch}
 echo "#--------------------------"
-echo "#    Done."
+echo "#    Pushing is done."
 echo "################################"
