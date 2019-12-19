@@ -9,11 +9,11 @@ Execute git push with less typing..
 Download
 ---
 ```
-curl -fsO https://raw.githubusercontent.com/buibr/git-sh/master/.gitdev ~/.gitdev
+curl -fsO https://raw.githubusercontent.com/buibr/git-sh/master/git/.gitdev ~/.gitdev
 ```
 OR
 ```
-wget https://raw.githubusercontent.com/buibr/git-sh/master/.gitdev -O ~/.gitdev
+wget https://raw.githubusercontent.com/buibr/git-sh/master/git/.gitdev -O ~/.gitdev
 ```
 *Note: Don't use sudo.
 

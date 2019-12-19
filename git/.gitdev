@@ -4,7 +4,7 @@
 # Copy this file to ~/.gitdev
 #   - curl https://raw.githubusercontent.com/buibr/bash-helpers/master/.gitdev --output ~/.gidev
 #   or
-#   - wget -O ~/.gidev https://raw.githubusercontent.com/buibr/bash-helpers/master/.gitdev
+#   - wget -O ~/.gidev https://raw.githubusercontent.com/buibr/bash-helpers/master/git/.gitdev
 #
 # Add alias to your bash or zsh with a shortcut( i usualy do 'p')
 #   - bash  echo "alias p='~/.gitdev'" >> ~/.bashrc
