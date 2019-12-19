@@ -3,8 +3,26 @@
 mysqlversion=$(mysql -V)
 
 checkIfTableExists(){
+
+    echo $1
+    echo $2
+    echo $3;
+    exit 1;
+
+    if [ "$(mysql -N -s -uroot -p$3 -e 'select 1;')" -ne "1" ]; then
+        echo "#--------------------------"
+        echo 'The root password is not valid';
+        echo "#--------------------------"
+        exit 1;
+    fi
+
+    echo 'done'
+
+    # checkDB=$(mysql -N -s -uroot -p$3 -e "select count(*) from information_schema.tables where table_schema='$1' and table_name='$2';")
+
+    # check=$(mysql -N -s -uroot -p$3 -e "select count(*) from information_schema.tables where table_schema='$1' and table_name='$2';")
+
     return 0;
-    # return $(mysql -N -s -uroot -p$3 -e "select count(*) from information_schema.tables where table_schema='$1' and table_name='$2';")
 }
 
 echo "################################"
@@ -17,9 +35,9 @@ read -p "#    New Password:  " Password
 echo "#--------------------------"
 read -p "#    Mysql Root Password: " RootPasswod
 echo "#--------------------------"
-read "#    Checkin for existed..."
+echo "#    Checkin for existed..."
 
-if [ checkIfTableExists Database User RootPasswod  -eq 1]; 
+if [ $(checkIfTableExists ${Database} ${User} ${RootPasswod}) -gd "1" ]; 
 then
     echo "Table ${User} exists already.";
     exit 0;
