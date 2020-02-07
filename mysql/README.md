@@ -17,12 +17,12 @@ Install
 ---
 
 If you are using zsh as main shell, run:
-``` echo "alias p='~/.gitdev'" >> ~/.zprofile ```
+``` echo "alias m='~/.mysqldev'" >> ~/.zprofile ```
 
 If bash
-``` echo "alias p='~/.gitdev'" >> ~/.bash_profile ```
+``` echo "alias m='~/.mysqldev'" >> ~/.bash_profile ```
 
 Usage
 ---
 
-got to any git repository and type `p` in terminal, type your message and that's it.
+got to any git repository and type `m` in terminal, type your message and that's it.

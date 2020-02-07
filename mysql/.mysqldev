@@ -4,25 +4,12 @@ mysqlversion=$(mysql -V)
 
 checkIfTableExists(){
 
-    echo $1
-    echo $2
-    echo $3;
-    exit 1;
-
-    if [ "$(mysql -N -s -uroot -p$3 -e 'select 1;')" -ne "1" ]; then
-        echo "#--------------------------"
-        echo 'The root password is not valid';
-        echo "#--------------------------"
-        exit 1;
-    fi
-
-    echo 'done'
-
-    # checkDB=$(mysql -N -s -uroot -p$3 -e "select count(*) from information_schema.tables where table_schema='$1' and table_name='$2';")
-
-    # check=$(mysql -N -s -uroot -p$3 -e "select count(*) from information_schema.tables where table_schema='$1' and table_name='$2';")
-
-    return 0;
+    if [  ]; 
+    then 
+        return 1; 
+    else 
+        return 0;
+    fi; 
 }
 
 echo "################################"
@@ -33,16 +20,27 @@ read -p "#    New Database:  " Database
 read -p "#    New User:      " User
 read -p "#    New Password:  " Password
 echo "#--------------------------"
-read -p "#    Mysql Root Password: " RootPasswod
+read -p "#    Mysql Root Password: " RootPassword
 echo "#--------------------------"
 echo "#    Checkin for existed..."
 
-if [ $(checkIfTableExists ${Database} ${User} ${RootPasswod}) -gd "1" ]; 
+RP_CHECK=`mysql -N -s -uroot -p$RootPassword -e 'select "good";' 2>&1 | grep "good" `
+
+if [[ "$RP_CHECK" != "good" ]]; 
 then
-    echo "Table ${User} exists already.";
+    echo ""
+    echo "Wrong root password";
+    echo ""
     exit 0;
-else
-    echo "Table ${User} does not exists and we will create now.";
+fi
+
+DB_CKECK=`mysqlshow -uroot -p$RootPassword $Database 2>&1 | grep -o "Database: $Database"`
+
+if [ "$DB_CKECK" == "Database: $Database" ]; 
+then
+    echo ""
+    echo "Database exists. Please try another name";
+    echo ""
     exit 0;
 fi
 
@@ -50,10 +48,11 @@ echo "#--------------------------"
 echo "#    Generating file..."
 echo "CREATE DATABASE ${Database} CHARACTER SET utf8 COLLATE utf8_general_ci;" > /tmp/tempsql.sql
 echo "GRANT ALL PRIVILEGES ON ${Database}.* TO '${Database}'@'localhost' IDENTIFIED BY  '${Password}';" >> /tmp/tempsql.sql
+echo "GRANT ALL PRIVILEGES ON ${Database}.* TO '${Database}'@'%' IDENTIFIED BY  '${Password}';" >> /tmp/tempsql.sql
 echo "FLUSH PRIVILEGES;" >> /tmp/tempsql.sql
 echo "#--------------------------"
 echo "#    Storing to database"
-mysql -uroot -p${RootPasswod} < /tmp/tempsql.sql
+mysql -uroot -p${RootPassword} < /tmp/tempsql.sql 2>&1
 echo "#--------------------------"
 echo "#    Removing temporary files"
 rm -rf /tmp/tempsql.sql
