@@ -2,16 +2,6 @@
 
 mysqlversion=$(mysql -V)
 
-checkIfTableExists(){
-
-    if [  ]; 
-    then 
-        return 1; 
-    else 
-        return 0;
-    fi; 
-}
-
 echo "################################"
 echo "#    Create new mysql database"
 echo "################################"
