@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl -s -w '\nLookup time:\t\t%{time_namelookup}\nConnect time:\t\t%{time_connect}\nSSL handshake time:\t%{time_appconnect}\nPre-Transfer time:\t%{time_pretransfer}\nRedirect time:\t\t%{time_redirect}\nTime to first byte:\t%{time_starttransfer}\n\nTotal time:\t\t%{time_total}\n' -o /dev/null $1

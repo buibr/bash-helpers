@@ -10,7 +10,7 @@ read -p "#    New Database:  " Database
 read -p "#    New User:      " User
 read -p "#    New Password:  " Password
 echo "#--------------------------"
-read -p "#    Mysql Root Password: " RootPassword
+read -s -p "#    Mysql Root Password: " RootPassword
 echo "#--------------------------"
 echo "#    Checkin for existed..."
 
@@ -37,8 +37,8 @@ fi
 echo "#--------------------------"
 echo "#    Generating file..."
 echo "CREATE DATABASE ${Database} CHARACTER SET utf8 COLLATE utf8_general_ci;" > /tmp/tempsql.sql
-echo "GRANT ALL PRIVILEGES ON ${Database}.* TO '${User}'@'localhost' IDENTIFIED BY  '${Password}';" >> /tmp/tempsql.sql
-echo "GRANT ALL PRIVILEGES ON ${Database}.* TO '${User}'@'%' IDENTIFIED BY  '${Password}';" >> /tmp/tempsql.sql
+echo "CREATE USER '${User}'@'localhost' IDENTIFIED BY '${Password}';" > /tmp/tempsql.sql
+echo "GRANT ALL ON ${Database}.* TO '${User}'@'localhost';" >> /tmp/tempsql.sql
 echo "FLUSH PRIVILEGES;" >> /tmp/tempsql.sql
 echo "#--------------------------"
 echo "#    Storing to database"
@@ -48,5 +48,3 @@ echo "#    Removing temporary files"
 rm -rf /tmp/tempsql.sql
 echo "#    Process finished."
 echo "################################"
-
-

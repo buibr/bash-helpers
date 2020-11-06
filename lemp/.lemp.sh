@@ -8,7 +8,7 @@ sudo apt update
 #---------------------------------------
 sudo install nginx
 sudo ufw enable
-sudo ufw allow 'Nginx HTTP'
+sudo ufw allow 'Nginx Full'
 sudo ufw status
 
 #   Install MySQL Server
