@@ -1,0 +1,49 @@
+# some more ls aliases
+alias ll='ls -alFhn'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Add an "alert" alias for long running commands.  Use like so:
+#   sleep 10; alert
+alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+
+# sail
+alias sa='sail artisan '
+alias sc='sail composer '
+alias st='sail test '
+alias sd='sail debug '
+alias snpm='sail npm'
+alias sa-mfs='sail artisan migrate:fresh --seed'
+alias sa-rl='sail artisan route:list '
+alias sa-rln='sail artisan route:list --name '
+alias sa-t='sail artisan test'
+alias sa-tf='sail artisan test --filter '
+
+# midx
+alias mx_backup='sail exec  mariadb-backup bash midx/scripts/backup.sh'
+alias mx_deploy='git pull && mx_deploy_php && mx_deploy_js'
+alias mx_deploy_force='git pull && mx_down_remove && mx_deploy_php && mx_deploy_js'
+alias mx_deploy_js='sail up -d && rm -rf ./public/assets/*.* && rm -rf ./public/hot && sail npm i && sail npm run build-only'
+alias mx_deploy_php='sail up -d && sail artisan clear && sail artisan optimize:clear && sail composer install -o --ignore-platform-reqs && sail artisan migrate --force --no-interaction && sail artisan optimize'
+alias mx_down='sail down'
+alias mx_down_remove='sail down --rmi local -v'
+alias mx_restore='sail exec  mariadb-backup bash midx/scripts/restore.sh'
+
+# debuging
+alias sd-t='sail debug test'
+alias sd-tf='sail debug test --filter '
+
+# composer
+alias bi-scu='sail composer update '
+alias bi-pstorm-rem-lock='rm -rf /home/buibr/.var/app/com.jetbrains.PhpStorm/config/JetBrains/*/.lock'
+
+# docker
+alias dps='docker ps'
+alias dc='docker compose'
+alias dce='docker compose exec'
+alias dcu='docker compose up'
+alias dcud='docker compose up -d'
+alias dcd='docker compose down'
+alias dcl='docker compose logs'
+alias dclf='docker compose logs -f'
+alias dclt='docker compose logs -f --tail=100'    

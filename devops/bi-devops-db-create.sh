@@ -1,0 +1,52 @@
+#!/bin/bash
+# bi: Create a MySQL database and user with full grants (interactive)
+# bi-arg: @none
+
+mysqlversion=$(mysql -V)
+
+echo "################################"
+echo "#    Create new mysql database"
+echo "################################"
+echo "#    Mysql:     ${mysqlversion}"
+read -p "#    New Database:  " Database
+read -p "#    New User:      " User
+read -p "#    New Password:  " Password
+echo "#--------------------------"
+read -s -p "#    Mysql Root Password: " RootPassword
+echo "#--------------------------"
+echo "#    Checkin for existed..."
+
+RP_CHECK=`mysql -N -s -uroot -p$RootPassword -e 'select "good";' 2>&1 | grep "good" `
+
+if [[ "$RP_CHECK" != "good" ]]; 
+then
+    echo ""
+    echo "Wrong root password";
+    echo ""
+    exit 0;
+fi
+
+DB_CKECK=`mysqlshow -uroot -p$RootPassword $Database 2>&1 | grep -o "Database: $Database"`
+
+if [ "$DB_CKECK" == "Database: $Database" ]; 
+then
+    echo ""
+    echo "Database exists. Please try another name";
+    echo ""
+    exit 0;
+fi
+
+echo "#--------------------------"
+echo "#    Generating file..."
+echo "CREATE DATABASE ${Database} CHARACTER SET utf8 COLLATE utf8_general_ci;" > /tmp/tempsql.sql
+echo "CREATE USER '${User}'@'localhost' IDENTIFIED BY '${Password}';" > /tmp/tempsql.sql
+echo "GRANT ALL ON ${Database}.* TO '${User}'@'localhost';" >> /tmp/tempsql.sql
+echo "FLUSH PRIVILEGES;" >> /tmp/tempsql.sql
+echo "#--------------------------"
+echo "#    Storing to database"
+mysql -uroot -p${RootPassword} < /tmp/tempsql.sql 2>&1
+echo "#--------------------------"
+echo "#    Removing temporary files"
+rm -rf /tmp/tempsql.sql
+echo "#    Process finished."
+echo "################################"

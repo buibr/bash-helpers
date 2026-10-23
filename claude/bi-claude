@@ -1,0 +1,452 @@
+#!/bin/bash
+# bi: Run Claude Code with several saved accounts (personal / work)
+# bi-arg: use       Start claude in THIS terminal as <name>
+# bi-arg: switch    Change the account every new claude uses
+# bi-arg: usage     Show plan usage for all accounts
+# bi-arg: list      List profiles, mark the active one
+# bi-arg: --help    Show help
+# bi-arg use: @run:ls ~/.claude/profiles # saved profile
+# bi-arg use: --help    Show help
+# bi-arg switch: @run:ls ~/.claude/profiles # switch to this profile
+# bi-arg switch: save    Save the logged-in account as <name>
+# bi-arg switch: list    List profiles
+# bi-arg switch: rm      Delete a saved profile
+# bi-arg switch: --help  Show help
+# bi-arg usage: @run:ls ~/.claude/profiles # saved profile
+# bi-arg usage: --json  Raw JSON output
+# bi-arg usage: --help  Show help
+#
+# bi-claude - run Claude Code with several saved accounts (e.g. personal / work)
+#
+# Profiles are stored (chmod 700) in ~/.claude/profiles/<name>/. Settings, history,
+# MCP servers, projects etc. stay shared between accounts; only the login differs.
+#
+# First-time setup:
+#   claude  (/login with personal)  ->  bi-claude switch save personal
+#   claude  (/login with work)      ->  bi-claude switch save work
+
+set -euo pipefail
+
+BASE="$HOME/.claude"
+CREDS="$BASE/.credentials.json"
+STATE="$HOME/.claude.json"
+PROFILES="$BASE/profiles"
+HOMES="$HOME/.claude-use"
+API="https://api.anthropic.com/api/oauth/usage"
+
+if [ -t 1 ]; then
+    B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; D=$'\e[2m'; N=$'\e[0m'
+else
+    B=""; G=""; Y=""; R=""; D=""; N=""
+fi
+
+die()  { printf '%s✘ %s%s\n' "$R" "$1" "$N" >&2; exit 1; }
+ok()   { printf '%s✔ %s%s\n' "$G" "$1" "$N"; }
+warn() { printf '%s⚠ %s%s\n' "$Y" "$1" "$N" >&2; }
+
+profiles() { find "$PROFILES" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort; }
+describe() { jq -r '"\(.emailAddress // "?")  \(.organizationName // "")"' "$1"; }
+account_id() { jq -r '"\(.accountUuid // ""):\(.organizationUuid // "")"' "$1"; }
+expires() { jq -r '.claudeAiOauth.expiresAt // 0' "$1" 2>/dev/null || echo 0; }
+
+# Identity of the live login (the one plain `claude` uses): accountUuid:organizationUuid
+live_id() { [ -f "$STATE" ] && jq -r '.oauthAccount // {}' "$STATE" | account_id /dev/stdin; }
+
+# Name of the profile matching the live login (empty if none)
+current() {
+    local id p
+    id=$(live_id)
+    for p in $(profiles); do
+        [ -f "$PROFILES/$p/account.json" ] && [ "$(account_id "$PROFILES/$p/account.json")" = "$id" ] && { echo "$p"; return; }
+    done
+}
+
+list() {
+    local cur p
+    cur=$(current)
+    if [ -z "$(profiles)" ]; then
+        echo "No profiles saved yet. Log in with claude, then: bi-claude switch save <name>"
+    fi
+    for p in $(profiles); do
+        if [ "$p" = "$cur" ]; then
+            printf '  %s* %-12s%s %s\n' "$G$B" "$p" "$N" "$(describe "$PROFILES/$p/account.json")"
+        else
+            printf '    %-12s %s%s%s\n' "$p" "$D" "$(describe "$PROFILES/$p/account.json")" "$N"
+        fi
+    done
+    [ -z "$cur" ] && printf '  %slive login: %s (not saved)%s\n' "$Y" "$(jq -r '.oauthAccount.emailAddress // "none"' "$STATE")" "$N"
+    return 0
+}
+
+help_main() {
+    cat <<'EOF'
+bi-claude - run Claude Code with several saved accounts
+
+Usage:
+  bi-claude use <name> [claude args...]   start claude in THIS terminal as <name>
+  bi-claude switch [name]                 change the account every new claude uses
+  bi-claude usage [name...]               show plan usage for all accounts
+  bi-claude list                          list profiles, mark the active one
+
+  bi-claude <command> --help              details for one command
+
+First-time setup:
+  claude  (/login with personal)  ->  bi-claude switch save personal
+  claude  (/login with work)      ->  bi-claude switch save work
+EOF
+}
+
+# ---------------------------------------------------------------- switch ----
+
+help_switch() {
+    cat <<'EOF'
+bi-claude switch - switch Claude Code between saved accounts (e.g. personal / work)
+
+Swaps ~/.claude/.credentials.json and the "oauthAccount" block in ~/.claude.json.
+Settings, history, MCP servers, projects etc. stay shared between accounts.
+Profiles are stored (chmod 700) in ~/.claude/profiles/<name>/.
+
+Usage:
+  bi-claude switch                 toggle between the two profiles (or list if != 2)
+  bi-claude switch <name>          switch to profile <name>
+  bi-claude switch save <name>     save the currently logged-in account as <name>
+  bi-claude switch list            list profiles, mark the active one
+  bi-claude switch rm <name>       delete a saved profile
+
+Note: sessions already running keep their account; start a new `claude` after switching.
+EOF
+}
+
+# Snapshot the live login into profile $1
+save() {
+    local name="$1" dir="$PROFILES/$1"
+    [ -f "$CREDS" ] || die "$CREDS not found - log in with claude first"
+    [ "$(jq -r '.oauthAccount // empty' "$STATE")" ] || die "not logged in (no oauthAccount in $STATE)"
+    mkdir -p "$dir"
+    cp "$CREDS" "$dir/credentials.json"
+    jq '.oauthAccount' "$STATE" > "$dir/account.json"
+    chmod 600 "$dir"/*
+}
+
+switch_to() {
+    local target="$1" cur tmp
+    [ -d "$PROFILES/$target" ] || die "no profile '$target' (have: $(profiles | tr '\n' ' '))"
+    cur=$(current)
+    if [ "$cur" = "$target" ]; then
+        ok "already on '$target' ($(describe "$PROFILES/$target/account.json"))"
+        return
+    fi
+
+    # Keep the outgoing profile fresh (tokens get refreshed while in use)
+    if [ -n "$cur" ]; then
+        save "$cur"
+    elif [ -f "$CREDS" ]; then
+        warn "live login $(jq -r '.oauthAccount.emailAddress // "?"' "$STATE") is not a saved profile - backing up to $PROFILES/.unsaved-backup"
+        mkdir -p "$PROFILES/.unsaved-backup"
+        cp "$CREDS" "$PROFILES/.unsaved-backup/credentials.json"
+        jq '.oauthAccount' "$STATE" > "$PROFILES/.unsaved-backup/account.json"
+    fi
+
+    pgrep -x claude >/dev/null 2>&1 && warn "claude is running - open sessions keep their old account; start a new one"
+
+    cp "$PROFILES/$target/credentials.json" "$CREDS"
+    chmod 600 "$CREDS"
+
+    tmp=$(mktemp "$STATE.XXXXXX")
+    jq --slurpfile acc "$PROFILES/$target/account.json" '.oauthAccount = $acc[0]' "$STATE" > "$tmp"
+    chmod --reference="$STATE" "$tmp"
+    mv "$tmp" "$STATE"
+
+    ok "switched to '$target' ($(describe "$PROFILES/$target/account.json"))"
+}
+
+cmd_switch() {
+    local all cur
+    case "${1:-}" in -h|--help|help) help_switch; return ;; esac
+
+    command -v jq >/dev/null || die "jq is required (apt install jq)"
+    [ -f "$STATE" ] || die "$STATE not found - run claude and log in first"
+
+    umask 077
+    mkdir -p "$PROFILES"
+    chmod 700 "$PROFILES"
+
+    case "${1:-}" in
+        "")
+            mapfile -t all < <(profiles)
+            if [ "${#all[@]}" -eq 2 ]; then
+                cur=$(current)
+                if   [ "$cur" = "${all[0]}" ]; then switch_to "${all[1]}"
+                elif [ "$cur" = "${all[1]}" ]; then switch_to "${all[0]}"
+                else list; echo; echo "Live login is not a saved profile; pick one: bi-claude switch <name>"; fi
+            else
+                list
+            fi
+            ;;
+        list|ls|status) list ;;
+        save)
+            [ -n "${2:-}" ] || die "usage: bi-claude switch save <name>"
+            save "$2"; ok "saved current login as '$2' ($(describe "$PROFILES/$2/account.json"))" ;;
+        rm|remove)
+            [ -n "${2:-}" ] && [ -d "$PROFILES/$2" ] || die "usage: bi-claude switch rm <existing-name>"
+            rm -rf "${PROFILES:?}/$2"; ok "removed profile '$2'" ;;
+        *) switch_to "$1" ;;
+    esac
+}
+
+# ------------------------------------------------------------------- use ----
+
+help_use() {
+    cat <<'EOF'
+bi-claude use - start Claude Code in THIS terminal with a saved account
+
+Unlike `bi-claude switch` (which changes the account for every new claude),
+this starts one claude pinned to a profile and leaves every other terminal alone.
+Profiles are the ones saved with `bi-claude switch save <name>`.
+
+Usage:
+  bi-claude use <name> [claude args...]          start claude as <name>
+  bi-claude use --name <name> [claude args...]   same, long form
+  bi-claude use                                  list profiles
+
+How: claude runs with CLAUDE_CONFIG_DIR=~/.claude-use/<name>. That folder links
+to everything in ~/.claude (settings, history, projects, skills, plugins...) and
+only the login differs: its credentials are the profile's own file, so refreshed
+tokens land back in the profile.
+
+Note: changes claude writes to .claude.json in a pinned session (e.g. MCP servers
+added with `claude mcp add`, trusted folders) stay in that profile's copy until
+~/.claude.json changes again; make such changes in a normal `claude` session.
+EOF
+}
+
+# True when the account every other terminal uses is this same profile
+is_live() { [ "$(live_id)" = "$(account_id "$profile/account.json")" ]; }
+
+# Same account in two places = two copies of one token; keep whichever was refreshed last
+sync_live() {
+    is_live && [ -f "$CREDS" ] || return 0
+    if   [ "$(expires "$CREDS")" -gt "$(expires "$profile/credentials.json")" ]; then cp "$CREDS" "$profile/credentials.json"
+    elif [ "$(expires "$profile/credentials.json")" -gt "$(expires "$CREDS")" ]; then cp "$profile/credentials.json" "$CREDS"
+    fi
+    chmod 600 "$CREDS" "$profile/credentials.json"
+}
+
+# If claude replaced the link with a real file, move the new tokens into the profile
+collect() {
+    local creds="$dir/.credentials.json"
+    if [ -f "$creds" ] && [ ! -L "$creds" ]; then
+        cp "$creds" "$profile/credentials.json"
+        chmod 600 "$profile/credentials.json"
+        rm -f "$creds"
+    fi
+    ln -sfn "$profile/credentials.json" "$creds"
+}
+
+cmd_use() {
+    local name="" entry base tmp
+    case "${1:-}" in
+        ""|list|ls)     list; echo; echo "Start one here: bi-claude use <name>"; return ;;
+        -h|--help|help) help_use; return ;;
+        --name|-n)      name="${2:-}"; shift; shift || true ;;
+        --name=*)       name="${1#--name=}"; shift ;;
+        *)              name="$1"; shift ;;
+    esac
+    [ "${1:-}" = "--" ] && shift
+
+    command -v jq >/dev/null || die "jq is required (apt install jq)"
+    command -v claude >/dev/null || die "claude not found in PATH"
+    [ -f "$STATE" ] || die "$STATE not found - run claude and log in first"
+    [ -n "$name" ] || die "usage: bi-claude use <name>"
+
+    # Read by is_live / sync_live / collect, also from the EXIT trap
+    profile="$PROFILES/$name"
+    [ -f "$profile/credentials.json" ] && [ -f "$profile/account.json" ] \
+        || die "no profile '$name' (have: $(profiles | tr '\n' ' '))"
+
+    umask 077
+    dir="$HOMES/$name"
+    mkdir -p "$dir"
+    chmod 700 "$HOMES" "$dir"
+
+    sync_live
+    collect
+
+    # Share everything else with ~/.claude
+    for entry in "$BASE"/* "$BASE"/.[!.]*; do
+        [ -e "$entry" ] || continue
+        base=$(basename "$entry")
+        case "$base" in .credentials.json|.claude.json|profiles) continue ;; esac
+        if [ -L "$dir/$base" ] || [ ! -e "$dir/$base" ]; then
+            ln -sfn "$entry" "$dir/$base"
+        fi
+    done
+
+    # Own copy of the state file, with this profile's account in it
+    if [ ! -f "$dir/.claude.json" ] || [ "$STATE" -nt "$dir/.claude.json" ]; then
+        tmp=$(mktemp "$dir/.claude.json.XXXXXX")
+        jq --slurpfile acc "$profile/account.json" '.oauthAccount = $acc[0]' "$STATE" > "$tmp"
+        mv "$tmp" "$dir/.claude.json"
+    fi
+
+    trap 'collect; sync_live' EXIT
+
+    ok "this terminal: '$name' ($(describe "$profile/account.json"))"
+    CLAUDE_CONFIG_DIR="$dir" claude "$@"
+}
+
+# ----------------------------------------------------------------- usage ----
+
+help_usage() {
+    cat <<'EOF'
+bi-claude usage - show plan usage (session / weekly limits) for every saved account
+
+Profiles are the ones saved with `bi-claude switch save <name>`.
+Read-only: it never switches accounts and never refreshes or rewrites tokens.
+
+Usage:
+  bi-claude usage                 usage for all profiles
+  bi-claude usage <name>...       usage for the given profiles only
+  bi-claude usage --json [name]   raw API response per profile
+
+A profile whose token has expired can't be queried; start it once with
+`bi-claude use <name>` (claude refreshes the token) and run this again.
+EOF
+}
+
+# The same account can have up to three copies of its token (profile, pinned
+# session, live login); print the one that was refreshed last
+freshest() {
+    local name="$1" best="" f
+    local candidates=("$PROFILES/$name/credentials.json" "$HOMES/$name/.credentials.json")
+    [ "$(account_id "$PROFILES/$name/account.json")" = "$LIVE_ID" ] && candidates+=("$CREDS")
+    for f in "${candidates[@]}"; do
+        [ -f "$f" ] || continue
+        if [ -z "$best" ] || [ "$(expires "$f")" -gt "$(expires "$best")" ]; then best="$f"; fi
+    done
+    echo "$best"
+}
+
+bar() {
+    local pct="$1" width=20 filled color="$G" i out=""
+    filled=$(( (pct * width + 50) / 100 ))
+    [ "$filled" -gt "$width" ] && filled=$width
+    [ "$pct" -ge 70 ] && color="$Y"
+    [ "$pct" -ge 90 ] && color="$R"
+    for ((i = 0; i < width; i++)); do
+        if [ "$i" -lt "$filled" ]; then out+="█"; else out+="░"; fi
+    done
+    printf '%s%s%s %s%3d%%%s' "$color" "$out" "$N" "$color" "$pct" "$N"
+}
+
+# "in 3h 20m" for today, otherwise "Wed 02:59"
+resets() {
+    local at="$1" ts left
+    [ -n "$at" ] || return 0
+    ts=$(date -d "$at" +%s 2>/dev/null) || return 0
+    left=$(( ts - $(date +%s) ))
+    if   [ "$left" -le 0 ];     then printf 'resets now'
+    elif [ "$left" -lt 3600 ];  then printf 'resets in %dm' $(( left / 60 ))
+    elif [ "$left" -lt 86400 ]; then printf 'resets in %dh %dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
+    else printf 'resets %s' "$(date -d "@$ts" '+%a %H:%M')"
+    fi
+}
+
+show() {
+    local name="$1" creds token body code label pct at want got mark="  "
+    [ "$(account_id "$PROFILES/$name/account.json")" = "$LIVE_ID" ] && mark="$G$B* $N"
+    creds=$(freshest "$name")
+
+    if [ "$JSON" -eq 0 ]; then
+        printf '%s%s%-12s%s %s%s  %s%s\n' "$mark" "$B" "$name" "$N" "$D" \
+            "$(describe "$PROFILES/$name/account.json")" \
+            "$(jq -r '.claudeAiOauth.subscriptionType // ""' "$creds" 2>/dev/null)" "$N"
+    fi
+
+    if [ -z "$creds" ] || [ "$(( $(expires "$creds") / 1000 ))" -le "$(date +%s)" ]; then
+        printf '    %stoken expired - run: bi-claude use %s%s\n\n' "$Y" "$name" "$N"
+        return 0
+    fi
+
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds")
+    body=$(curl -sS -m 15 -w '\n%{http_code}' "$API" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" 2>&1) || { printf '    %srequest failed: %s%s\n\n' "$R" "$body" "$N"; return 0; }
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+
+    if [ "$code" != "200" ]; then
+        printf '    %sHTTP %s: %s%s\n\n' "$R" "$code" \
+            "$(jq -r '.error.message // .message // empty' <<<"$body" 2>/dev/null || true)" "$N"
+        return 0
+    fi
+
+    if [ "$JSON" -eq 1 ]; then
+        jq --arg name "$name" '{profile: $name} + .' <<<"$body"
+        return 0
+    fi
+
+    # A profile saved while logged in as someone else reports that other account's usage
+    want=$(jq -r '.emailAddress // empty' "$PROFILES/$name/account.json")
+    got=$(curl -sS -m 15 "${API%/usage}/profile" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null | jq -r '.account.email // empty' 2>/dev/null || true)
+    if [ -n "$got" ] && [ -n "$want" ] && [ "$got" != "$want" ]; then
+        printf '    %s⚠ this token belongs to %s, not %s - numbers below are for %s%s\n' "$Y" "$got" "$want" "$got" "$N"
+    fi
+
+    while IFS=$'\t' read -r label pct at; do
+        printf '    %-14s %s  %s%s%s\n' "$label" "$(bar "$pct")" "$D" "$(resets "$at")" "$N"
+    done < <(jq -r '
+        [ ["session (5h)", .five_hour], ["weekly", .seven_day],
+          ["weekly opus", .seven_day_opus], ["weekly sonnet", .seven_day_sonnet] ][]
+        | select(.[1] != null and .[1].utilization != null)
+        | [.[0], (.[1].utilization | round), (.[1].resets_at // "")] | @tsv' <<<"$body")
+
+    jq -r '.extra_usage | select(.is_enabled == true)
+        | "    extra usage    \(.used_credits // 0) / \(.monthly_limit // "∞") \(.currency // "")"' <<<"$body"
+    echo
+}
+
+cmd_usage() {
+    local arg name names=()
+    JSON=0
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help|help) help_usage; return ;;
+            --json)         JSON=1 ;;
+            *)              names+=("$arg") ;;
+        esac
+    done
+
+    command -v jq >/dev/null || die "jq is required (apt install jq)"
+    command -v curl >/dev/null || die "curl is required (apt install curl)"
+
+    LIVE_ID=$(live_id || true)
+
+    [ "${#names[@]}" -gt 0 ] || mapfile -t names < <(profiles)
+    [ "${#names[@]}" -gt 0 ] || { echo "No profiles saved yet. Log in with claude, then: bi-claude switch save <name>"; return; }
+
+    for name in "${names[@]}"; do
+        [ -f "$PROFILES/$name/account.json" ] || die "no profile '$name' (have: $(profiles | tr '\n' ' '))"
+        show "$name"
+    done
+}
+
+# -------------------------------------------------------------- dispatch ----
+
+# The old names (bi-claude-use, bi-claude-switch, bi-claude-usage) are links to this file
+case "$(basename "$0")" in
+    bi-claude-use)    set -- use "$@" ;;
+    bi-claude-switch) set -- switch "$@" ;;
+    bi-claude-usage)  set -- usage "$@" ;;
+esac
+
+case "${1:-}" in
+    use)               shift; cmd_use "$@" ;;
+    switch)            shift; cmd_switch "$@" ;;
+    usage)             shift; cmd_usage "$@" ;;
+    list|ls|status)    cmd_switch list ;;
+    ""|-h|--help|help) help_main ;;
+    *)                 die "unknown command '$1' (try: bi-claude --help)" ;;
+esac

@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+# bi: DNS, port, health and auth diagnostic for mail servers
+# bi-arg: -e=  --email: address to test
+# bi-arg: --email=  Address to test
+# bi-arg: -p=  --password (prompted if omitted)
+# bi-arg: --password=  Password (prompted if omitted)
+# bi-arg: -t=  --timeout: TCP connect timeout (default 5)
+# bi-arg: --timeout=  TCP connect timeout (default 5)
+# bi-arg: -v  --verbose: show raw server banners
+# bi-arg: --verbose  Show raw server banners
+# bi-arg: -h  Show help
+# bi-email-test — DNS, port, health, and auth diagnostic for mail servers
+
+set -uo pipefail
+
+# ── colours ──────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  RED='\033[0;31m' GRN='\033[0;32m' YEL='\033[1;33m'
+  BLU='\033[0;34m' CYN='\033[0;36m' BLD='\033[1m' RST='\033[0m'
+else
+  RED='' GRN='' YEL='' BLU='' CYN='' BLD='' RST=''
+fi
+
+PASS="${GRN}✔${RST}" FAIL="${RED}✘${RST}" WARN="${YEL}!${RST}" INFO="${BLU}·${RST}"
+
+# ── state tracking ────────────────────────────────────────────────────────────
+declare -A PORT_OPEN   # PORT_OPEN[host:port]=1
+declare -A MX_HOSTS    # MX_HOSTS[host]=priority
+DNS_OK=0               # set to 1 when at least one MX resolves
+HEALTH_OK=0            # set to 1 when at least one SMTP responds
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+section() { echo -e "\n${BLD}${CYN}══ $* ══${RST}"; }
+pass()    { echo -e "  ${PASS} $*"; }
+fail()    { echo -e "  ${FAIL} $*"; }
+warn()    { echo -e "  ${WARN} $*"; }
+info()    { echo -e "  ${INFO} $*"; }
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -e, --email EMAIL       Email address to test
+  -p, --password PASS     Password (prompted if omitted)
+  -t, --timeout SECS      TCP connect timeout (default: 5)
+  -v, --verbose           Show raw server banners
+  -h, --help              This help
+
+If no options are given the script prompts interactively.
+EOF
+  exit 0
+}
+
+check_dep() {
+  local cmd=$1
+  command -v "$cmd" &>/dev/null || { echo "Missing dependency: $cmd" >&2; exit 1; }
+}
+
+port_open() {      # port_open host port → 0/1
+  local host=$1 port=$2
+  nc -z -w"${TIMEOUT}" "$host" "$port" 2>/dev/null
+}
+
+smtp_banner() {    # smtp_banner host port → prints banner, returns 0 on 220
+  local host=$1 port=$2
+  local out
+  out=$(echo "QUIT" | nc -w"${TIMEOUT}" "$host" "$port" 2>/dev/null | head -5)
+  if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${out}${RST}"; fi
+  grep -qE "^220" <<<"$out"
+}
+
+ssl_banner() {     # ssl_banner host port → prints cert info, returns 0 on success
+  local host=$1 port=$2
+  local out
+  out=$(echo "QUIT" | timeout "${TIMEOUT}" openssl s_client -connect "${host}:${port}" \
+        -quiet -no_ign_eof 2>/dev/null | head -5)
+  if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${out}${RST}"; fi
+  grep -qE "^220" <<<"$out"
+}
+
+starttls_check() { # starttls_check host port → 0 if STARTTLS offered
+  local host=$1 port=$2
+  local out
+  out=$(printf "EHLO test\r\nQUIT\r\n" | nc -w"${TIMEOUT}" "$host" "$port" 2>/dev/null)
+  grep -qi "STARTTLS" <<<"$out"
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+EMAIL="" PASSWORD="" TIMEOUT=5 VERBOSE=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -e|--email)    EMAIL="$2";    shift 2 ;;
+    -p|--password) PASSWORD="$2"; shift 2 ;;
+    -t|--timeout)  TIMEOUT="$2";  shift 2 ;;
+    -v|--verbose)  VERBOSE=1;     shift   ;;
+    -h|--help)     usage ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+# ── interactive prompts ───────────────────────────────────────────────────────
+if [[ -z "$EMAIL" ]]; then
+  read -rp "Email address: " EMAIL
+fi
+if [[ -z "$PASSWORD" ]]; then
+  read -rsp "Password: " PASSWORD; echo
+fi
+
+# basic format check
+if ! grep -qE '^[^@]+@[^@]+\.[^@]+$' <<<"$EMAIL"; then
+  echo -e "${RED}Invalid email format.${RST}" >&2; exit 1
+fi
+
+DOMAIN="${EMAIL##*@}"
+echo -e "\n${BLD}Target: ${CYN}${EMAIL}${RST}  domain: ${CYN}${DOMAIN}${RST}"
+
+# ── dependency checks ─────────────────────────────────────────────────────────
+for dep in dig nc openssl python3; do check_dep "$dep"; done
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — DNS
+# ═════════════════════════════════════════════════════════════════════════════
+section "DNS Records"
+
+# MX
+mapfile -t mx_raw < <(dig +short MX "$DOMAIN" 2>/dev/null | sort -n)
+if [[ ${#mx_raw[@]} -eq 0 ]]; then
+  fail "No MX records found for ${DOMAIN}"
+else
+  pass "MX records (${#mx_raw[@]} found):"
+  for rec in "${mx_raw[@]}"; do
+    prio="${rec%% *}"; host="${rec##* }"; host="${host%.}"
+    info "  priority ${prio}  →  ${host}"
+    MX_HOSTS["$host"]="$prio"
+  done
+fi
+
+# A/AAAA for each MX
+for host in "${!MX_HOSTS[@]}"; do
+  ip4=$(dig +short A    "$host" 2>/dev/null | head -1)
+  ip6=$(dig +short AAAA "$host" 2>/dev/null | head -1)
+  if [[ -n "$ip4" || -n "$ip6" ]]; then
+    pass "${host}  →  ${ip4:-}${ip6:+ / $ip6}"
+    DNS_OK=1
+  else
+    fail "${host} — no A/AAAA record (DNS resolution failure)"
+  fi
+done
+
+# SPF
+spf=$(dig +short TXT "$DOMAIN" 2>/dev/null | { grep -i "v=spf" || true; } | head -1 | tr -d '"')
+if [[ -n "$spf" ]]; then
+  pass "SPF:  ${spf}"
+else
+  warn "No SPF record found"
+fi
+
+# DMARC
+dmarc=$(dig +short TXT "_dmarc.${DOMAIN}" 2>/dev/null | { grep -i "v=DMARC" || true; } | head -1 | tr -d '"')
+if [[ -n "$dmarc" ]]; then
+  pass "DMARC: ${dmarc}"
+else
+  warn "No DMARC record found"
+fi
+
+# PTR (reverse DNS for first MX)
+if [[ ${#MX_HOSTS[@]} -gt 0 ]]; then
+  first_mx=$(echo "${!MX_HOSTS[@]}" | tr ' ' '\n' | head -1)
+  first_ip=$(dig +short A "$first_mx" 2>/dev/null | head -1)
+  if [[ -n "$first_ip" ]]; then
+    ptr=$(dig +short -x "$first_ip" 2>/dev/null | head -1)
+    if [[ -n "$ptr" ]]; then
+      pass "PTR for ${first_ip}: ${ptr}"
+    else
+      warn "No PTR record for ${first_ip} (may affect spam scoring)"
+    fi
+  fi
+fi
+
+if [[ $DNS_OK -eq 0 ]]; then
+  echo -e "\n${RED}DNS check failed — cannot resolve any MX host. Aborting.${RST}"
+  exit 2
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — Port Connectivity
+# ═════════════════════════════════════════════════════════════════════════════
+section "Port Connectivity"
+
+declare -A PORT_LABELS=(
+  [25]="SMTP"    [587]="SMTP/submission" [465]="SMTPS"
+  [143]="IMAP"   [993]="IMAPS"
+  [110]="POP3"   [995]="POP3S"
+)
+
+for host in "${!MX_HOSTS[@]}"; do
+  echo -e "  ${BLD}${host}${RST}"
+  for port in 25 587 465 143 993 110 995; do
+    label="${PORT_LABELS[$port]:-port $port}"
+    if port_open "$host" "$port"; then
+      pass "  ${port}/${label}"
+      PORT_OPEN["${host}:${port}"]=1
+    else
+      info "  ${port}/${label} — closed"
+    fi
+  done
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — Server Health
+# ═════════════════════════════════════════════════════════════════════════════
+section "Server Health"
+
+PLAIN_SMTP_PORTS=(25 587)
+SSL_SMTP_PORTS=(465)
+PLAIN_IMAP_PORTS=(143)
+SSL_IMAP_PORTS=(993)
+PLAIN_POP_PORTS=(110)
+SSL_POP_PORTS=(995)
+
+for host in "${!MX_HOSTS[@]}"; do
+  echo -e "  ${BLD}${host}${RST}"
+
+  # plain SMTP
+  for port in "${PLAIN_SMTP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    if smtp_banner "$host" "$port"; then
+      pass "  SMTP :${port} — banner OK"
+      HEALTH_OK=1
+      if starttls_check "$host" "$port"; then
+        pass "  SMTP :${port} — STARTTLS offered"
+      else
+        warn "  SMTP :${port} — STARTTLS not advertised"
+      fi
+    else
+      fail "  SMTP :${port} — no 220 banner"
+    fi
+  done
+
+  # SSL SMTP
+  for port in "${SSL_SMTP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    if ssl_banner "$host" "$port"; then
+      pass "  SMTPS :${port} — SSL handshake + 220 OK"
+      HEALTH_OK=1
+    else
+      fail "  SMTPS :${port} — SSL/banner failed"
+    fi
+  done
+
+  # plain IMAP
+  for port in "${PLAIN_IMAP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    banner=$(echo "a LOGOUT" | nc -w"${TIMEOUT}" "$host" "$port" 2>/dev/null | head -3)
+    if grep -qE "^\* OK" <<<"$banner"; then
+      pass "  IMAP  :${port} — greeting OK"
+      if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${banner}${RST}"; fi
+    else
+      fail "  IMAP  :${port} — no greeting"
+    fi
+  done
+
+  # SSL IMAP
+  for port in "${SSL_IMAP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    banner=$(echo "a LOGOUT" | timeout "${TIMEOUT}" openssl s_client \
+             -connect "${host}:${port}" -quiet -no_ign_eof 2>/dev/null | head -3)
+    if grep -qE "^\* OK" <<<"$banner"; then
+      pass "  IMAPS :${port} — SSL + greeting OK"
+      if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${banner}${RST}"; fi
+    else
+      fail "  IMAPS :${port} — SSL/greeting failed"
+    fi
+  done
+
+  # plain POP3
+  for port in "${PLAIN_POP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    banner=$(echo "QUIT" | nc -w"${TIMEOUT}" "$host" "$port" 2>/dev/null | head -2)
+    if grep -qE "^\+OK" <<<"$banner"; then
+      pass "  POP3  :${port} — greeting OK"
+      if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${banner}${RST}"; fi
+    else
+      fail "  POP3  :${port} — no +OK greeting"
+    fi
+  done
+
+  # SSL POP3
+  for port in "${SSL_POP_PORTS[@]}"; do
+    [[ -n "${PORT_OPEN["${host}:${port}"]:-}" ]] || continue
+    banner=$(echo "QUIT" | timeout "${TIMEOUT}" openssl s_client \
+             -connect "${host}:${port}" -quiet -no_ign_eof 2>/dev/null | head -2)
+    if grep -qE "^\+OK" <<<"$banner"; then
+      pass "  POP3S :${port} — SSL + greeting OK"
+      if [[ -n "$VERBOSE" ]]; then echo -e "    ${BLU}${banner}${RST}"; fi
+    else
+      fail "  POP3S :${port} — SSL/greeting failed"
+    fi
+  done
+done
+
+if [[ $HEALTH_OK -eq 0 ]]; then
+  echo -e "\n${RED}No healthy SMTP server found. Skipping auth tests.${RST}"
+  exit 3
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — Authentication Tests
+# ═════════════════════════════════════════════════════════════════════════════
+section "Authentication Tests"
+
+# Build JSON-like args for python
+open_ports_json="{"
+first=1
+for key in "${!PORT_OPEN[@]}"; do
+  host="${key%%:*}"; port="${key##*:}"
+  [[ $first -eq 0 ]] && open_ports_json+=","
+  open_ports_json+="\"${host}:${port}\": 1"
+  first=0
+done
+open_ports_json+="}"
+
+python3 - "$EMAIL" "$PASSWORD" "$TIMEOUT" "$open_ports_json" <<'PYEOF'
+import sys, imaplib, poplib, smtplib, ssl, json, socket
+
+email_addr = sys.argv[1]
+password   = sys.argv[2]
+timeout    = int(sys.argv[3])
+open_ports = json.loads(sys.argv[4])
+
+PASS = "\033[0;32m✔\033[0m"
+FAIL = "\033[0;31m✘\033[0m"
+WARN = "\033[1;33m!\033[0m"
+
+socket.setdefaulttimeout(timeout)
+
+def ok(msg):   print(f"  {PASS} {msg}")
+def bad(msg):  print(f"  {FAIL} {msg}")
+def note(msg): print(f"  {WARN} {msg}")
+
+def is_open(host, port):
+    return open_ports.get(f"{host}:{port}", 0) == 1
+
+hosts = list({k.split(":")[0] for k in open_ports})
+
+for host in hosts:
+    print(f"\033[1m  {host}\033[0m")
+
+    # ── IMAP 143 (STARTTLS) ───────────────────────────────────────────────
+    if is_open(host, 143):
+        try:
+            ctx = ssl.create_default_context()
+            M = imaplib.IMAP4(host, 143)
+            M.starttls(ssl_context=ctx)
+            rv, _ = M.login(email_addr, password)
+            if rv == "OK":
+                ok(f"IMAP  :143 STARTTLS — login SUCCESS")
+                M.logout()
+            else:
+                bad(f"IMAP  :143 STARTTLS — login FAILED (bad credentials?)")
+        except imaplib.IMAP4.error as e:
+            bad(f"IMAP  :143 — {e}")
+        except Exception as e:
+            bad(f"IMAP  :143 — {e}")
+
+    # ── IMAPS 993 ────────────────────────────────────────────────────────
+    if is_open(host, 993):
+        try:
+            ctx = ssl.create_default_context()
+            M = imaplib.IMAP4_SSL(host, 993, ssl_context=ctx)
+            rv, _ = M.login(email_addr, password)
+            if rv == "OK":
+                ok(f"IMAPS :993 SSL     — login SUCCESS")
+                M.logout()
+            else:
+                bad(f"IMAPS :993 SSL     — login FAILED")
+        except imaplib.IMAP4.error as e:
+            bad(f"IMAPS :993 — {e}")
+        except Exception as e:
+            bad(f"IMAPS :993 — {e}")
+
+    # ── POP3 110 (STARTTLS) ───────────────────────────────────────────────
+    if is_open(host, 110):
+        try:
+            ctx = ssl.create_default_context()
+            P = poplib.POP3(host, 110)
+            P.stls(context=ctx)
+            P.user(email_addr)
+            P.pass_(password)
+            ok(f"POP3  :110 STARTTLS — login SUCCESS")
+            P.quit()
+        except poplib.error_proto as e:
+            bad(f"POP3  :110 — {e}")
+        except Exception as e:
+            bad(f"POP3  :110 — {e}")
+
+    # ── POP3S 995 ────────────────────────────────────────────────────────
+    if is_open(host, 995):
+        try:
+            ctx = ssl.create_default_context()
+            P = poplib.POP3_SSL(host, 995, context=ctx)
+            P.user(email_addr)
+            P.pass_(password)
+            ok(f"POP3S :995 SSL     — login SUCCESS")
+            P.quit()
+        except poplib.error_proto as e:
+            bad(f"POP3S :995 — {e}")
+        except Exception as e:
+            bad(f"POP3S :995 — {e}")
+
+    # ── SMTP 587 (STARTTLS) ───────────────────────────────────────────────
+    if is_open(host, 587):
+        try:
+            ctx = ssl.create_default_context()
+            S = smtplib.SMTP(host, 587, timeout=timeout)
+            S.ehlo()
+            S.starttls(context=ctx)
+            S.ehlo()
+            S.login(email_addr, password)
+            ok(f"SMTP  :587 STARTTLS — auth SUCCESS")
+            S.quit()
+        except smtplib.SMTPAuthenticationError as e:
+            bad(f"SMTP  :587 — auth FAILED ({e.smtp_code} {e.smtp_error.decode(errors='replace')})")
+        except Exception as e:
+            bad(f"SMTP  :587 — {e}")
+
+    # ── SMTPS 465 ────────────────────────────────────────────────────────
+    if is_open(host, 465):
+        try:
+            ctx = ssl.create_default_context()
+            S = smtplib.SMTP_SSL(host, 465, context=ctx, timeout=timeout)
+            S.ehlo()
+            S.login(email_addr, password)
+            ok(f"SMTPS :465 SSL     — auth SUCCESS")
+            S.quit()
+        except smtplib.SMTPAuthenticationError as e:
+            bad(f"SMTPS :465 — auth FAILED ({e.smtp_code} {e.smtp_error.decode(errors='replace')})")
+        except Exception as e:
+            bad(f"SMTPS :465 — {e}")
+
+    # ── SMTP 25 (no auth — just note it) ─────────────────────────────────
+    if is_open(host, 25):
+        note("SMTP  :25  — open (relay/MTA port, auth not tested)")
+
+PYEOF
+
+echo -e "\n${BLD}${GRN}Done.${RST}"

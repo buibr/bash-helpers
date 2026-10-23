@@ -1,0 +1,38 @@
+export PATH=$HOME/.me/:$PATH
+export PATH=$HOME/.me/devops:$PATH
+export PATH=$HOME/.me/dir:$PATH
+export PATH=$HOME/.me/git:$PATH
+export PATH=$HOME/.me/mysql:$PATH
+export PATH=$HOME/.me/web:$PATH
+export PATH=$HOME/.me/claude:$PATH
+export PATH=$HOME/.me/android:$PATH
+
+
+# Composer
+export PATH="$PATH:$HOME/.config/composer/vendor/bin"
+
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+
+
+# opencode
+export PATH=/home/buibr/.opencode/bin:$PATH
+
+
+# Added by Toolbox App
+export PATH="$PATH:/home/buibr/.local/share/JetBrains/Toolbox/scripts"
+
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+
+# claude
+export PATH="$HOME/.local/bin:$PATH"
+
+# a
+export NVM_DIR="$HOME/.nvm"
+
+# machine-specific settings (bi android jdk-fix / adb-fix write here); not in git
+if [ -f "$HOME/.me/exports.local" ]; then . "$HOME/.me/exports.local"; fi

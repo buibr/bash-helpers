@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# bi: Scan TCP ports on a LAN: [CIDR] [ports...] (default 192.168.1.0/24:8000)
+# bi-arg: --timeout=  Connect timeout in seconds (default 0.5)
+# bi-arg: --start=    First IPv4 address
+# bi-arg: --end=      Last IPv4 address
+# bi-arg: -h          Show help
+"""Scan TCP ports on an IPv4 CIDR network or an explicit address range."""
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import errno
+import ipaddress
+import socket
+import sys
+
+
+def port_number(value):
+    try:
+        port = int(value)
+        if 1 <= port <= 65535:
+            return port
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("ports must be integers from 1 to 65535")
+
+
+def positive_timeout(value):
+    try:
+        timeout = float(value)
+        if 0 < timeout < float("inf"):
+            return timeout
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("timeout must be a finite positive number")
+
+
+def check_port(task):
+    host, port, timeout = task
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            status = "OPEN"
+    except TimeoutError:
+        status = "TIMEOUT"
+    except OSError as error:
+        if error.errno == errno.ECONNREFUSED:
+            status = "CLOSED"
+        else:
+            status = "ERROR: " + str(error)
+    endpoint = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    return endpoint, status
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("targets", nargs="*", metavar="CIDR_OR_PORT",
+                        help="optional IPv4 CIDR followed by TCP ports (default port: 8000)")
+    parser.add_argument("--timeout", type=positive_timeout, default=0.5,
+                        help="connection timeout in seconds (default: 0.5)")
+    parser.add_argument("--start", type=ipaddress.IPv4Address,
+                        help="first IPv4 address (default: 192.168.1.2)")
+    parser.add_argument("--end", type=ipaddress.IPv4Address,
+                        help="last IPv4 address, inclusive (default: 192.168.1.254)")
+    parser.add_argument("--all", action="store_true", help="accepted for compatibility; all results are always shown")
+    args = parser.parse_args()
+    network = None
+    if args.targets and "/" in args.targets[0]:
+        if args.start is not None or args.end is not None:
+            parser.error("use either CIDR or --start/--end")
+        try:
+            network = ipaddress.IPv4Network(args.targets.pop(0), strict=False)
+        except ValueError as error:
+            parser.error(str(error))
+        if network.num_addresses > 65536:
+            parser.error("network must contain at most 65536 addresses")
+    try:
+        ports = list(dict.fromkeys(port_number(value) for value in args.targets)) or [8000]
+    except argparse.ArgumentTypeError as error:
+        parser.error(str(error))
+    args.start = args.start or ipaddress.IPv4Address("192.168.1.2")
+    args.end = args.end or ipaddress.IPv4Address("192.168.1.254")
+    if args.start > args.end:
+        parser.error("--start must be less than or equal to --end")
+    if int(args.end) - int(args.start) >= 65536:
+        parser.error("address range must contain at most 65536 addresses")
+    addresses = (network.hosts() if network is not None else
+                 (ipaddress.IPv4Address(address)
+                  for address in range(int(args.start), int(args.end) + 1)))
+    target = str(network) if network is not None else f"{args.start} through {args.end}"
+    print(f"Scanning {target}, TCP ports {', '.join(map(str, ports))}...", flush=True)
+    tasks = [(str(ipaddress.IPv4Address(address)), port, args.timeout)
+             for address in addresses for port in ports]
+    print(f"{'IP:PORT':<24} STATUS", flush=True)
+    results = []
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        futures = [pool.submit(check_port, task) for task in tasks]
+        for future in as_completed(futures):
+            endpoint, status = future.result()
+            results.append((endpoint, status))
+            print(f"{endpoint:<24} {status}", flush=True)
+    errors = [status for _, status in results if status.startswith("ERROR:")]
+    if errors:
+        print(f"{len(errors)} checks failed; first failure: {errors[0]}", file=sys.stderr)
+        return 2
+    if any(status == "OPEN" for _, status in results):
+        return 0
+    print("No open TCP ports found in this range.")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
